@@ -1,0 +1,189 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Secure Auth</title>
+<style>
+  :root{
+    --bg:#eef1f4; --panel:#ffffff; --ink:#18212b; --muted:#5d6b79;
+    --line:#d3dae1; --accent:#0b6b63; --accent-ink:#ffffff; --bad:#b3261e; --ok:#1b6e3c;
+  }
+  @media (prefers-color-scheme: dark){
+    :root{ --bg:#10161c; --panel:#18212b; --ink:#e6ebf0; --muted:#93a1af;
+           --line:#2b3745; --accent:#3cb5a8; --accent-ink:#06201d; --bad:#ff8a80; --ok:#7fd69b; }
+  }
+  *{box-sizing:border-box}
+  body{margin:0;min-height:100vh;display:grid;place-items:center;padding:24px;
+       background:var(--bg);color:var(--ink);
+       font:16px/1.5 system-ui,-apple-system,"Segoe UI",Roboto,sans-serif}
+  main{width:100%;max-width:440px}
+  h1{font-size:1.4rem;margin:0 0 4px}
+  .sub{color:var(--muted);margin:0 0 20px}
+  .card{background:var(--panel);border:1px solid var(--line);border-radius:10px;padding:22px}
+  .tabs{display:flex;gap:4px;margin-bottom:18px;border-bottom:1px solid var(--line)}
+  .tabs button{flex:1;background:none;border:0;border-bottom:2px solid transparent;
+               padding:10px;color:var(--muted);font:inherit;cursor:pointer}
+  .tabs button[aria-selected="true"]{color:var(--ink);border-color:var(--accent);font-weight:600}
+  label{display:block;font-size:.9rem;margin:12px 0 4px}
+  input{width:100%;padding:10px 12px;border:1px solid var(--line);border-radius:6px;
+        background:var(--bg);color:var(--ink);font:inherit}
+  input:focus-visible,button:focus-visible{outline:2px solid var(--accent);outline-offset:2px}
+  .hint{font-size:.82rem;color:var(--muted);margin-top:4px}
+  .primary{width:100%;margin-top:18px;padding:11px;border:0;border-radius:6px;
+           background:var(--accent);color:var(--accent-ink);font:inherit;font-weight:600;cursor:pointer}
+  .secondary{padding:9px 12px;border:1px solid var(--line);border-radius:6px;background:none;
+             color:var(--ink);font:inherit;cursor:pointer}
+  #msg{min-height:1.4em;margin-top:14px;font-size:.92rem}
+  #msg.bad{color:var(--bad)} #msg.ok{color:var(--ok)}
+  dl{display:grid;grid-template-columns:auto 1fr;gap:6px 14px;margin:0 0 16px}
+  dt{color:var(--muted)} dd{margin:0;word-break:break-all}
+  pre{background:var(--bg);border:1px solid var(--line);border-radius:6px;padding:12px;
+      font-size:.8rem;overflow-x:auto;margin:8px 0 16px;max-width:100%}
+  .row{display:flex;gap:8px;flex-wrap:wrap}
+  [hidden]{display:none !important}
+</style>
+</head>
+<body>
+<main>
+  <h1>Secure Authentication System</h1>
+  <p class="sub">Flask, JWT, bcrypt and PostgreSQL</p>
+
+  <!-- signed-out view -->
+  <section class="card" id="auth-view" hidden>
+    <div class="tabs" role="tablist">
+      <button role="tab" id="tab-login" aria-selected="true">Log in</button>
+      <button role="tab" id="tab-register" aria-selected="false">Create account</button>
+    </div>
+    <form id="form" autocomplete="on">
+      <div id="username-wrap" hidden>
+        <label for="username">Username</label>
+        <input id="username" autocomplete="username" maxlength="30">
+      </div>
+      <label for="email">Email</label>
+      <input id="email" type="email" autocomplete="email" required>
+      <label for="password">Password</label>
+      <input id="password" type="password" autocomplete="current-password" required>
+      <div class="hint" id="pw-hint" hidden>At least 8 characters with uppercase, lowercase and a digit.</div>
+      <button class="primary" id="submit" type="submit">Log in</button>
+    </form>
+    <div id="msg" role="status"></div>
+  </section>
+
+  <!-- signed-in view -->
+  <section class="card" id="app-view" hidden>
+    <dl>
+      <dt>Username</dt><dd id="u-name"></dd>
+      <dt>Email</dt><dd id="u-email"></dd>
+      <dt>Member since</dt><dd id="u-since"></dd>
+      <dt>Active sessions</dt><dd id="u-sessions"></dd>
+      <dt>Token expires</dt><dd id="u-exp"></dd>
+    </dl>
+    <div>Access token payload</div>
+    <pre id="payload"></pre>
+    <div class="row">
+      <button class="secondary" id="btn-me">Call protected API</button>
+      <button class="secondary" id="btn-out">Log out</button>
+      <button class="secondary" id="btn-all">Log out everywhere</button>
+    </div>
+    <div id="msg2" role="status" style="margin-top:14px;font-size:.92rem"></div>
+  </section>
+</main>
+
+<script>
+  // The access token lives only in this variable (not localStorage), so XSS cannot read it
+  // from storage. The refresh token is an HttpOnly cookie that JavaScript can never see.
+  let accessToken = null, refreshTimer = null, mode = "login";
+  const $ = id => document.getElementById(id);
+
+  async function api(path, opts = {}) {
+    const headers = { "Content-Type": "application/json" };
+    if (accessToken) headers.Authorization = "Bearer " + accessToken;
+    const res = await fetch(path, { credentials: "same-origin", ...opts, headers });
+    let body = {};
+    try { body = await res.json(); } catch (_) {}
+    return { ok: res.ok, status: res.status, body };
+  }
+
+  function setMode(m) {
+    mode = m;
+    const reg = m === "register";
+    $("tab-login").setAttribute("aria-selected", !reg);
+    $("tab-register").setAttribute("aria-selected", reg);
+    $("username-wrap").hidden = !reg;
+    $("pw-hint").hidden = !reg;
+    $("password").autocomplete = reg ? "new-password" : "current-password";
+    $("submit").textContent = reg ? "Create account" : "Log in";
+    $("msg").textContent = ""; $("msg").className = "";
+  }
+  $("tab-login").onclick = () => setMode("login");
+  $("tab-register").onclick = () => setMode("register");
+
+  function say(text, kind) { $("msg").textContent = text; $("msg").className = kind || ""; }
+
+  $("form").addEventListener("submit", async e => {
+    e.preventDefault();
+    const payload = { email: $("email").value, password: $("password").value };
+    if (mode === "register") payload.username = $("username").value;
+    const r = await api("/api/auth/" + mode, { method: "POST", body: JSON.stringify(payload) });
+    if (!r.ok) return say(r.body.error || "Something went wrong.", "bad");
+    if (mode === "register") {
+      setMode("login");
+      return say(r.body.message, "ok");
+    }
+    $("password").value = "";
+    startSession(r.body);
+  });
+
+  function decode(token) {
+    return JSON.parse(atob(token.split(".")[1].replace(/-/g, "+").replace(/_/g, "/")));
+  }
+
+  async function startSession(data) {
+    accessToken = data.access_token;
+    const claims = decode(accessToken);
+    $("payload").textContent = JSON.stringify(claims, null, 2);
+    $("u-exp").textContent = new Date(claims.exp * 1000).toLocaleTimeString();
+    $("auth-view").hidden = true; $("app-view").hidden = false;
+    await loadProfile();
+    // silently renew the access token one minute before it expires
+    clearTimeout(refreshTimer);
+    refreshTimer = setTimeout(silentRefresh, Math.max((data.expires_in - 60) * 1000, 5000));
+  }
+
+  async function loadProfile() {
+    const r = await api("/api/me");
+    if (!r.ok) return showSignedOut();
+    $("u-name").textContent = r.body.username;
+    $("u-email").textContent = r.body.email;
+    $("u-since").textContent = new Date(r.body.created_at).toLocaleDateString();
+    $("u-sessions").textContent = r.body.active_sessions;
+  }
+
+  async function silentRefresh() {
+    const r = await api("/api/auth/refresh", { method: "POST" });
+    if (r.ok) startSession(r.body); else showSignedOut();
+  }
+
+  function showSignedOut(text) {
+    accessToken = null; clearTimeout(refreshTimer);
+    $("app-view").hidden = true; $("auth-view").hidden = false;
+    setMode("login");
+    if (text) say(text, "ok");
+  }
+
+  $("btn-me").onclick = async () => {
+    const r = await api("/api/me");
+    $("msg2").textContent = r.ok ? "Protected API replied: 200 OK" : "Rejected: " + (r.body.error || r.status);
+  };
+  $("btn-out").onclick = async () => { await api("/api/auth/logout", { method: "POST" }); showSignedOut("You are logged out."); };
+  $("btn-all").onclick = async () => { await api("/api/auth/logout-all", { method: "POST" }); showSignedOut("Logged out of every device."); };
+
+  // on page load, try to restore the session from the refresh cookie
+  (async () => {
+    const r = await api("/api/auth/refresh", { method: "POST" });
+    if (r.ok) startSession(r.body); else showSignedOut();
+  })();
+</script>
+</body>
+</html>
